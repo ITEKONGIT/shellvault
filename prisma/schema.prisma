@@ -1,0 +1,113 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                        String       @id @default(uuid())
+  username                  String       @unique
+  email                     String       @unique
+  passwordHash              String?      @map("password_hash")
+  totpSecret                String?      @map("totp_secret")
+  totpVerified              Boolean      @default(false) @map("totp_verified")
+  backupCodes               String[]     @default([]) @map("backup_codes")
+  isAdmin                   Boolean      @default(false) @map("is_admin")
+  isActive                  Boolean      @default(true) @map("is_active")
+  isLocked                  Boolean      @default(false) @map("is_locked")
+  createdAt                 DateTime     @default(now()) @map("created_at")
+  lastLogin                 DateTime?    @map("last_login")
+  emailVerificationAttempts Int          @default(0) @map("email_verification_attempts")
+  emailVerificationExpiry   DateTime?    @map("email_verification_expiry")
+  emailVerificationToken    String?      @map("email_verification_token")
+  emailVerified             Boolean      @default(false) @map("email_verified")
+  failedLoginAttempts       Int          @default(0) @map("failed_login_attempts")
+  lastLoginAt               DateTime?    @map("last_login_at")
+  lockedUntil               DateTime?    @map("locked_until")
+  auditLogs                 AuditLog[]
+  servers                   Server[]
+  sessions                  SshSession[]
+
+  @@index([lockedUntil], map: "idx_users_locked_until")
+  @@index([lastLoginAt], map: "idx_users_last_login")
+  @@map("users")
+}
+
+model Server {
+  id                String       @id @default(uuid())
+  userId            String       @map("user_id")
+  ipAddress         String       @map("ip_address")
+  sshUsername       String       @map("ssh_username")
+  hostname          String?
+  osInfo            String?      @map("os_info")
+  handshakeUuid     String       @unique @default(uuid()) @map("handshake_uuid")
+  agentInstalled    Boolean      @default(false) @map("agent_installed")
+  agentVersion      String?      @map("agent_version")
+  agentLastSeen     DateTime?    @map("agent_last_seen")
+  agentHealthStatus String       @default("pending") @map("agent_health_status")
+  rotationEnabled   Boolean      @default(true) @map("rotation_enabled")
+  rotationInterval  Int          @default(24) @map("rotation_interval")
+  lastRotated       DateTime?    @map("last_rotated")
+  isActive          Boolean      @default(true) @map("is_active")
+  lastConnected     DateTime?    @map("last_connected")
+  createdAt         DateTime     @default(now()) @map("created_at")
+  updatedAt         DateTime     @updatedAt @map("updated_at")
+  tags              String[]
+  notes             String?
+  name              String
+  port              Int          @default(22)
+  user              User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessions          SshSession[]
+
+  @@unique([userId, ipAddress])
+  @@index([userId])
+  @@index([agentInstalled])
+  @@index([isActive])
+  @@map("servers")
+}
+
+model SshSession {
+  id            String    @id @default(uuid())
+  userId        String    @map("user_id")
+  serverId      String    @map("server_id")
+  status        String    @default("active")
+  clientIp      String    @map("client_ip")
+  userAgent     String?   @map("user_agent")
+  startedAt     DateTime  @default(now()) @map("started_at")
+  endedAt       DateTime? @map("ended_at")
+  lastActivity  DateTime  @default(now()) @map("last_activity")
+  bytesSent     BigInt    @default(0) @map("bytes_sent")
+  bytesReceived BigInt    @default(0) @map("bytes_received")
+  errorMessage  String?   @map("error_message")
+  server        Server    @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([serverId])
+  @@index([status])
+  @@map("ssh_sessions")
+}
+
+model AuditLog {
+  id            BigInt   @id @default(autoincrement())
+  userId        String?  @map("user_id")
+  eventType     String   @map("event_type")
+  eventCategory String   @map("event_category")
+  severity      String   @default("info")
+  message       String
+  details       Json?
+  ipAddress     String?  @map("ip_address")
+  userAgent     String?  @map("user_agent")
+  createdAt     DateTime @default(now()) @map("created_at")
+  user          User?    @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([eventType])
+  @@index([eventCategory])
+  @@index([severity])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
