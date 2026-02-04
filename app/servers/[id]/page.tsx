@@ -1,11 +1,30 @@
 // app/servers/[id]/page.tsx
+// Updated with Connect Terminal functionality via Broker
+// ✅ FIXED: Next.js 16 params Promise handling
 
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, use } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import dynamic from 'next/dynamic';
 import { StatusBadge, DeleteServerModal } from '@/components/ui/server-components';
+
+// Dynamic import for terminal (client-side only)
+const SSHTerminal = dynamic(() => import('@/components/terminal/SSHTerminal'), {
+  ssr: false,
+  loading: () => (
+    <div className="flex items-center justify-center h-96 bg-zinc-900">
+      <div className="text-center">
+        <div className="w-8 h-8 border-2 border-amber-600 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
+        <p className="text-sm text-zinc-400">Loading terminal...</p>
+      </div>
+    </div>
+  ),
+});
+
+// ✅ ADDED: Broker URL for SSH connect
+const BROKER_URL = process.env.NEXT_PUBLIC_BROKER_URL || 'http://localhost:8080';
 
 interface Server {
   id: string;
@@ -28,17 +47,28 @@ interface Server {
   updatedAt: Date;
 }
 
+interface TerminalSession {
+  sessionId: string;
+  serverName: string;
+}
+
 export default function ServerDetailsPage({
   params,
 }: {
-  params: { id: string };
+  params: Promise<{ id: string }>;  // ✅ FIXED: params is a Promise in Next.js 16
 }) {
   const router = useRouter();
+  const resolvedParams = use(params);  // ✅ FIXED: Unwrap Promise with use()
   const [server, setServer] = useState<Server | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Terminal state
+  const [terminalSession, setTerminalSession] = useState<TerminalSession | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [connectError, setConnectError] = useState<string | null>(null);
 
   // Fetch server details
   useEffect(() => {
@@ -47,7 +77,7 @@ export default function ServerDetailsPage({
         setLoading(true);
         setError(null);
 
-        const response = await fetch(`/api/servers/${params.id}`);
+        const response = await fetch(`/api/servers/${resolvedParams.id}`);
         const data = await response.json();
 
         if (!response.ok) {
@@ -63,7 +93,82 @@ export default function ServerDetailsPage({
     };
 
     fetchServer();
-  }, [params.id]);
+  }, [resolvedParams.id]);
+
+  // Handle Connect - Request credentials and spawn terminal
+  const handleConnect = async () => {
+    if (!server) return;
+
+    try {
+      setConnecting(true);
+      setConnectError(null);
+
+      // Step 1: Request credentials via Next.js API (which calls broker for credentials)
+      const spawnResponse = await fetch(`/api/servers/${server.id}/terminal/spawn`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      const spawnData = await spawnResponse.json();
+
+      if (!spawnResponse.ok) {
+        throw new Error(spawnData.error || spawnData.details || 'Failed to get credentials');
+      }
+
+      console.log('Credentials received:', spawnData);
+
+      // ✅ CHANGED: Step 2: Establish SSH connection via BROKER (not Next.js)
+      const connectResponse = await fetch(`${BROKER_URL}/api/ssh/connect`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          sessionId: spawnData.sessionId,
+          credentials: {
+            username: spawnData.credentials.username,
+            auth_method: spawnData.credentials.authMethod,
+            credential: spawnData.credentials.keyPath || '',
+            ip_address: spawnData.server.ipAddress,
+            port: server.port,
+            hostname: spawnData.server.hostname,
+          },
+        }),
+      });
+
+      const connectData = await connectResponse.json();
+
+      if (!connectResponse.ok || !connectData.success) {
+        throw new Error(connectData.error || 'Failed to establish SSH connection');
+      }
+
+      console.log('SSH connection established:', connectData);
+
+      // Success! Open terminal
+      setTerminalSession({
+        sessionId: spawnData.sessionId,
+        serverName: server.name,
+      });
+
+    } catch (err: any) {
+      console.error('Connect error:', err);
+      setConnectError(err.message);
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  // Handle terminal close
+  const handleTerminalClose = () => {
+    setTerminalSession(null);
+  };
+
+  // Handle terminal error
+  const handleTerminalError = (error: string) => {
+    console.error('Terminal error:', error);
+  };
 
   // Handle delete
   const handleDelete = async () => {
@@ -82,7 +187,6 @@ export default function ServerDetailsPage({
         throw new Error(data.error || 'Failed to delete server');
       }
 
-      // Redirect to dashboard
       router.push('/dashboard');
     } catch (err: any) {
       alert(err.message);
@@ -130,6 +234,20 @@ export default function ServerDetailsPage({
             Back to Dashboard
           </Link>
         </div>
+      </div>
+    );
+  }
+
+  // Terminal view (full screen when connected)
+  if (terminalSession) {
+    return (
+      <div className="h-screen bg-zinc-950">
+        <SSHTerminal
+          sessionId={terminalSession.sessionId}
+          serverName={terminalSession.serverName}
+          onClose={handleTerminalClose}
+          onError={handleTerminalError}
+        />
       </div>
     );
   }
@@ -194,7 +312,53 @@ export default function ServerDetailsPage({
                 </div>
                 <p className="text-zinc-400">Server details and management</p>
               </div>
+
+              {/* Connect Button */}
+              <div className="flex flex-col items-end gap-2">
+                <button
+                  onClick={handleConnect}
+                  disabled={connecting || !server.agentInstalled || server.agentHealthStatus !== 'online'}
+                  className={`
+                    px-6 py-3 rounded-lg font-medium transition-all flex items-center gap-2
+                    ${server.agentInstalled && server.agentHealthStatus === 'online'
+                      ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                      : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
+                    }
+                    ${connecting ? 'opacity-75' : ''}
+                  `}
+                >
+                  {connecting ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      Connecting...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                      </svg>
+                      Connect Terminal
+                    </>
+                  )}
+                </button>
+
+                {!server.agentInstalled && (
+                  <span className="text-xs text-amber-500">Agent not installed</span>
+                )}
+                {server.agentInstalled && server.agentHealthStatus !== 'online' && (
+                  <span className="text-xs text-amber-500">Agent is {server.agentHealthStatus}</span>
+                )}
+              </div>
             </div>
+
+            {/* Connect Error */}
+            {connectError && (
+              <div className="mt-4 p-4 bg-red-900/20 border border-red-900/50 rounded-lg">
+                <p className="text-red-400 text-sm">
+                  <strong>Connection failed:</strong> {connectError}
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Details Grid */}
@@ -251,16 +415,15 @@ export default function ServerDetailsPage({
                   </div>
                 )}
                 <div>
+                  <p className="text-sm text-zinc-500 mb-1">Health Status</p>
+                 <div className="text-zinc-100">
+  <StatusBadge status={server.agentHealthStatus as any} />
+</div>
+                </div>
+                <div>
                   <p className="text-sm text-zinc-500 mb-1">Last Seen</p>
                   <p className="text-zinc-100">{formatDate(server.agentLastSeen)}</p>
                 </div>
-                {!server.agentInstalled && (
-                  <div className="mt-4 bg-amber-600/10 border border-amber-600/20 rounded p-3">
-                    <p className="text-sm text-amber-200">
-                      Agent installation will be available in Phase 3
-                    </p>
-                  </div>
-                )}
               </div>
             </div>
           </div>

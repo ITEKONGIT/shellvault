@@ -25,15 +25,48 @@ interface Credentials {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Helper to access broker server functions
+// Broker HTTP API (replaces global.shellVaultBroker)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-function getBrokerAPI() {
-  // Access the global broker API exported by broker-server.js
-  if (typeof global.shellVaultBroker === 'undefined') {
-    throw new Error('Broker server not available. Make sure broker-server.js is running.');
+const BROKER_URL = process.env.BROKER_URL || 'http://localhost:8080';
+
+/**
+ * Get agent status from broker via HTTP
+ */
+async function getBrokerAgentStatus(serverId: string) {
+  try {
+    const response = await fetch(`${BROKER_URL}/api/agent-status?serverId=${serverId}`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    
+    if (!response.ok) {
+      return null;
+    }
+    
+    return await response.json();
+  } catch (error) {
+    return null;
   }
-  return global.shellVaultBroker;
+}
+
+/**
+ * Request credentials from broker via HTTP
+ */
+async function requestCredentialsFromBroker(serverId: string, sessionId: string): Promise<Credentials> {
+  const response = await fetch(`${BROKER_URL}/api/credentials`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ serverId, sessionId }),
+  });
+  
+  const data = await response.json();
+  
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || 'Failed to get credentials from broker');
+  }
+  
+  return data.credentials;
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -53,7 +86,7 @@ export async function POST(
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const serverId = params.id;
+    const { id: serverId } = await params;
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // STEP 2: Verify server exists and belongs to user
@@ -111,18 +144,16 @@ export async function POST(
     });
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // STEP 5: Request credentials from agent via broker
+    // STEP 5: Request credentials from agent via broker HTTP API
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     try {
-      const broker = getBrokerAPI();
-      
       logger.info('Requesting credentials from agent', {
         serverId,
         sessionId,
       });
 
-      // Request credentials (this will wait for agent response)
-      const credentials = await broker.requestCredentials(serverId, sessionId);
+      // Request credentials via HTTP (this will wait for agent response)
+      const credentials = await requestCredentialsFromBroker(serverId, sessionId);
 
       logger.info('Credentials received from agent', {
         serverId,
@@ -168,7 +199,7 @@ export async function POST(
       });
 
       // Check specific error types
-      if (credError.message === 'Agent not connected') {
+      if (credError.message.includes('not connected') || credError.message === 'Agent not connected') {
         return NextResponse.json(
           { 
             error: 'Agent is not connected to broker',
@@ -178,7 +209,7 @@ export async function POST(
         );
       }
 
-      if (credError.message === 'Agent not authenticated') {
+      if (credError.message.includes('not authenticated') || credError.message === 'Agent not authenticated') {
         return NextResponse.json(
           { 
             error: 'Agent is not authenticated',
@@ -188,7 +219,7 @@ export async function POST(
         );
       }
 
-      if (credError.message === 'Credentials request timeout') {
+      if (credError.message.includes('timeout') || credError.message === 'Credentials request timeout') {
         return NextResponse.json(
           { 
             error: 'Credentials request timeout',
@@ -238,7 +269,7 @@ export async function GET(
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const serverId = params.id;
+    const { id: serverId } = await params;
 
     // Get server
     const server = await prisma.server.findFirst({
@@ -256,11 +287,10 @@ export async function GET(
       );
     }
 
-    // Check if agent is connected via broker
-    try {
-      const broker = getBrokerAPI();
-      const agent = broker.getAgent(serverId);
+    // Check if agent is connected via broker HTTP API
+    const agentStatus = await getBrokerAgentStatus(serverId);
 
+    if (agentStatus) {
       return NextResponse.json({
         success: true,
         server: {
@@ -271,13 +301,13 @@ export async function GET(
           agentLastSeen: server.agentLastSeen,
         },
         broker: {
-          connected: !!agent,
-          authenticated: agent?.authenticated || false,
-          connectedAt: agent?.connectedAt || null,
-          handshakeTier: agent?.handshakeTier || 0,
+          connected: agentStatus.connected || false,
+          authenticated: agentStatus.authenticated || false,
+          connectedAt: agentStatus.connectedAt || null,
+          handshakeTier: agentStatus.handshakeTier || 0,
         },
       });
-    } catch (brokerError) {
+    } else {
       // Broker not available
       return NextResponse.json({
         success: true,

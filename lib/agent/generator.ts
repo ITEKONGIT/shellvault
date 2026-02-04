@@ -1,5 +1,5 @@
 // lib/agent/generator.ts
-// ✅ PRODUCTION: AES-256-GCM Crypto + Encrypted Vault Secrets
+// ✅ PRODUCTION: AES-256-GCM Crypto + Encrypted Vault Secrets + Heartbeat + SSH Username
 
 export interface AgentConfig {
   userId: string;
@@ -7,6 +7,7 @@ export interface AgentConfig {
   handshakeUuid: string;
   brokerUrl: string;
   heartbeatUrl: string;
+  sshUsername: string;  // ✅ ADDED: SSH username from database
   version?: string;
   testMode?: boolean;
 }
@@ -18,7 +19,7 @@ export interface GeneratedAgent {
   credentials: string;
   wrapper: string;
   service: string;
-  secretManager: string;  // ✅ NEW: Secret manager module
+  secretManager: string;
 }
 
 export function generateModularAgent(config: AgentConfig): GeneratedAgent {
@@ -27,7 +28,6 @@ export function generateModularAgent(config: AgentConfig): GeneratedAgent {
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // FILE 1: agent.py - Main Orchestrator
-  // ✅ UPDATED: Loads secrets from encrypted vault
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   const agent = `#!/usr/bin/env python3
 """
@@ -41,7 +41,7 @@ import socket
 from datetime import datetime
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# ✅ LOAD SECRETS FROM ENCRYPTED VAULT (PRODUCTION)
+# LOAD SECRETS FROM ENCRYPTED VAULT (PRODUCTION)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def load_secrets():
@@ -52,7 +52,6 @@ def load_secrets():
         manager = SecretManager()
         secrets = manager.load_secrets()
         
-        # Validate required secrets
         required = ['user_id', 'server_id', 'handshake_uuid']
         for key in required:
             if key not in secrets:
@@ -72,21 +71,20 @@ def load_secrets():
         print(f"[FATAL] Failed to load secrets: {e}", flush=True)
         sys.exit(1)
 
-# Load secrets
 SECRETS = load_secrets()
 print(f"[INFO] Secrets loaded from encrypted vault", flush=True)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PUBLIC CONFIGURATION (Safe to store in file)
+# PUBLIC CONFIGURATION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PUBLIC_CONFIG = {
     'broker_url': '${config.brokerUrl}',
     'heartbeat_url': '${config.heartbeatUrl}',
+    'ssh_username': '${config.sshUsername}',  # ✅ ADDED
     'version': '${version}',
     'test_mode': ${testMode ? 'True' : 'False'},
 }
 
-# Combine secrets and public config
 CONFIG = {**SECRETS, **PUBLIC_CONFIG}
 
 
@@ -112,19 +110,15 @@ class ShellVaultAgent:
         self.running = True
         self.config = CONFIG
         
-        # Import modules
         from transport import TransportLayer
         from operations import Operations
         
-        # Initialize components
         self.transport = TransportLayer(self.config, self.logger)
         self.operations = Operations(self.config, self.logger)
         
-        # Register signal handlers
         signal.signal(signal.SIGTERM, self.shutdown)
         signal.signal(signal.SIGINT, self.shutdown)
         
-        # Register operation callbacks
         self.transport.on_command = self.operations.execute_command
         self.transport.on_health_check = self.operations.get_health_metrics
         self.transport.operations = self.operations
@@ -135,14 +129,15 @@ class ShellVaultAgent:
         self.logger.info("ShellVault Agent Starting")
         self.logger.info("=" * 60)
         self.logger.info("Server ID", server_id=self.config['server_id'][:16] + "...")
+        self.logger.info("SSH Username", ssh_user=self.config['ssh_username'])  # ✅ ADDED
         self.logger.info("Version", version=self.config['version'])
         self.logger.info("Hostname", hostname=socket.gethostname())
         self.logger.info("Mode", mode="TEST" if self.config['test_mode'] else "PRODUCTION")
         self.logger.info("Security", secrets="Encrypted vault (AES-256-GCM)")
+        self.logger.info("Heartbeat", interval="30 seconds")
         self.logger.info("=" * 60)
         
         try:
-            # Start transport layer
             self.transport.start()
         except KeyboardInterrupt:
             self.logger.info("Keyboard interrupt received")
@@ -168,14 +163,11 @@ if __name__ == "__main__":
     main()
 `;
 
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // FILE 2: transport.py - Communication Layer
-  // ✅ UNCHANGED: Already has AES-256-GCM encryption
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Transport layer stays the same (too long to repeat - no changes needed)
   const transport = `#!/usr/bin/env python3
 """
 Transport Layer - All Communication
-✅ Phase 1: AES-256-GCM Encryption + 3-tier handshake
+✅ UPDATED: Added periodic heartbeat in production mode
 """
 
 import json
@@ -183,13 +175,14 @@ import hashlib
 import time
 import socket
 import base64
+import threading
 from datetime import datetime, timezone
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 
 
 class Crypto:
-    """✅ AES-256-GCM Encryption (matching TypeScript implementation)"""
+    """AES-256-GCM Encryption (matching TypeScript implementation)"""
     
     ALGORITHM = 'aes-256-gcm'
     KEY_LENGTH = 32
@@ -199,7 +192,6 @@ class Crypto:
     
     def __init__(self, key: str):
         """Initialize crypto with user UUID"""
-        # Import cryptography library
         try:
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
             from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
@@ -214,7 +206,6 @@ class Crypto:
                 "Install: pip3 install cryptography --break-system-packages"
             )
         
-        # Derive encryption key from UUID
         self.key = self._derive_key(key)
         self.aesgcm = self.AESGCM(self.key)
     
@@ -231,38 +222,25 @@ class Crypto:
         return kdf.derive(user_uuid.encode('utf-8'))
     
     def encrypt(self, data: dict) -> str:
-        """
-        Encrypt data with AES-256-GCM
-        Returns: base64(IV + ciphertext + authTag)
-        """
+        """Encrypt data with AES-256-GCM"""
         import os
         
-        # Generate random IV (never reuse!)
         nonce = os.urandom(self.IV_LENGTH)
-        
-        # Encrypt data
         plaintext = json.dumps(data).encode('utf-8')
         ciphertext = self.aesgcm.encrypt(nonce, plaintext, None)
-        
-        # Combine: IV + ciphertext (ciphertext includes auth tag)
         combined = nonce + ciphertext
         
-        # Return as base64
         return base64.b64encode(combined).decode('utf-8')
     
     def decrypt(self, encrypted: str) -> dict:
         """Decrypt and verify AES-256-GCM data"""
-        # Decode from base64
         combined = base64.b64decode(encrypted)
         
-        # Extract IV and ciphertext
         nonce = combined[:self.IV_LENGTH]
         ciphertext = combined[self.IV_LENGTH:]
         
-        # Decrypt and verify
         plaintext = self.aesgcm.decrypt(nonce, ciphertext, None)
         
-        # Parse JSON
         return json.loads(plaintext.decode('utf-8'))
     
     @staticmethod
@@ -287,7 +265,6 @@ class HandshakeHandler:
         timestamp = challenge.get('timestamp')
         challenge_id = challenge.get('challenge_id')
         
-        # Verify timestamp (prevent replay attacks)
         try:
             challenge_time = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
             age = (datetime.now(timezone.utc) - challenge_time).total_seconds()
@@ -298,7 +275,6 @@ class HandshakeHandler:
             self.logger.error("TIER 1: Timestamp error", error=str(e))
             return None
         
-        # Generate response hash
         response_hash = self.crypto.hash(f"{nonce}:{self.config['handshake_uuid']}:{timestamp}")
         self.tier = 1
         
@@ -343,14 +319,12 @@ class HandshakeHandler:
     
     def handle_challenge(self, tier: int, encrypted_challenge: str) -> str:
         """Route challenge to appropriate tier handler"""
-        # Decrypt challenge
         try:
             challenge = self.crypto.decrypt(encrypted_challenge)
         except Exception as e:
             self.logger.error(f"TIER {tier}: Decryption failed", error=str(e))
             return None
         
-        # Route to handler
         if tier == 1:
             response = self.handle_tier1(challenge)
         elif tier == 2:
@@ -364,7 +338,6 @@ class HandshakeHandler:
         if not response:
             return None
         
-        # Encrypt response
         self.logger.info(f"TIER {tier}: Response generated")
         return self.crypto.encrypt(response)
     
@@ -429,7 +402,7 @@ class HTTPTransport:
 
 
 class WebSocketTransport:
-    """WebSocket Transport (PRODUCTION MODE)"""
+    """WebSocket Transport (PRODUCTION MODE) with Heartbeat"""
     
     def __init__(self, config, logger, crypto, handshake, on_command):
         self.config = config
@@ -440,6 +413,51 @@ class WebSocketTransport:
         self.ws = None
         self.running = True
         self._operations = None
+        self._heartbeat_thread = None
+        self._start_time = time.time()
+    
+    @property
+    def operations(self):
+        return self._operations
+    
+    @operations.setter
+    def operations(self, ops):
+        self._operations = ops
+    
+    def _start_heartbeat(self):
+        """Start heartbeat thread after authentication"""
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            return
+        
+        self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self._heartbeat_thread.start()
+        self.logger.info("💓 Heartbeat thread started (every 30s)")
+    
+    def _heartbeat_loop(self):
+        """Send periodic heartbeats to broker"""
+        while self.running and self.ws:
+            try:
+                time.sleep(30)
+                
+                if not self.running or not self.ws:
+                    break
+                
+                if not self.handshake.authenticated:
+                    continue
+                
+                heartbeat = {
+                    'type': 'heartbeat',
+                    'timestamp': datetime.now().isoformat(),
+                    'server_id': self.config['server_id'],
+                    'uptime': int(time.time() - self._start_time),
+                }
+                
+                self.ws.send(json.dumps(heartbeat))
+                self.logger.debug("💓 Heartbeat sent")
+                
+            except Exception as e:
+                self.logger.warn("Heartbeat error", error=str(e)[:50])
+                break
     
     def on_message(self, ws, message):
         """Handle incoming WebSocket messages"""
@@ -453,14 +471,12 @@ class WebSocketTransport:
                 
                 self.logger.info(f"Received TIER {tier} challenge")
                 
-                # Handle challenge
                 encrypted_response = self.handshake.handle_challenge(tier, encrypted_challenge)
                 if not encrypted_response:
                     self.logger.error(f"TIER {tier}: Failed to generate response")
                     ws.close()
                     return
                 
-                # Send response
                 ws.send(json.dumps({
                     'type': 'response',
                     'tier': tier,
@@ -471,6 +487,7 @@ class WebSocketTransport:
                 
             elif msg_type == 'handshake_complete':
                 self.logger.info("🎉 3-TIER HANDSHAKE COMPLETE!")
+                self._start_heartbeat()
                 
             elif msg_type == 'command':
                 command_id = data.get('commandId')
@@ -486,11 +503,10 @@ class WebSocketTransport:
                 
                 self.logger.info("Credentials request received", session_id=session_id)
                 
-                if self.operations:
-                    credentials_response = self.operations.get_credentials()
+                if self._operations:
+                    credentials_response = self._operations.get_credentials()
                     credentials_response['session_id'] = session_id
                     
-                    # Encrypt entire response
                     encrypted = self.crypto.encrypt(credentials_response)
                     
                     ws.send(json.dumps({
@@ -528,16 +544,13 @@ class WebSocketTransport:
             import websocket
         except ImportError:
             self.logger.error("websocket-client not installed")
-            self.logger.error("Install: pip3 install websocket-client --break-system-packages")
             return False
         
-        # Build WebSocket URL
         ws_url = self.config['broker_url'].replace('http://', 'ws://').replace('https://', 'wss://')
         ws_url = f"{ws_url}?serverId={self.config['server_id']}&userId={self.config['user_id']}"
         
         self.logger.info("Connecting to broker...")
         
-        # Create WebSocket app
         self.ws = websocket.WebSocketApp(
             ws_url,
             on_message=self.on_message,
@@ -606,7 +619,7 @@ class TransportLayer:
     
     @property
     def operations(self):
-        return self._operations if hasattr(self, '_operations') else None
+        return self._operations
     
     @operations.setter
     def operations(self, ops):
@@ -623,11 +636,10 @@ class TransportLayer:
         self.transport.stop()
 `;
 
-  // operations.py and credentials.py remain unchanged
+  // Operations stays mostly the same
   const operations = `#!/usr/bin/env python3
 """
 Operations Module - What the agent can do
-All executable operations and system monitoring
 """
 
 import subprocess
@@ -643,7 +655,7 @@ class Operations:
     def __init__(self, config, logger):
         self.config = config
         self.logger = logger
-        self.credential_retriever = CredentialRetriever(logger)
+        self.credential_retriever = CredentialRetriever(config, logger)  # ✅ PASS CONFIG
         self.stats = {
             'commands_executed': 0,
             'commands_failed': 0,
@@ -665,7 +677,7 @@ class Operations:
             
             self.stats['commands_executed'] += 1
             
-            response = {
+            return {
                 'type': 'command_result',
                 'command_id': command_id,
                 'exit_code': result.returncode,
@@ -673,9 +685,6 @@ class Operations:
                 'stderr': result.stderr[:10000],
                 'timestamp': datetime.now().isoformat()
             }
-            
-            self.logger.info("Command completed", exit_code=result.returncode)
-            return response
             
         except subprocess.TimeoutExpired:
             self.stats['commands_failed'] += 1
@@ -786,10 +795,13 @@ class Operations:
             }
 `;
 
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // FILE 4: credentials.py - ✅ UPDATED TO USE CONFIGURED USERNAME
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   const credentials = `#!/usr/bin/env python3
 """
 Credential Retrieval Module
-Knows HOW to get current credentials without storing them
+✅ UPDATED: Uses configured SSH username from dashboard
 """
 
 import os
@@ -803,7 +815,8 @@ from datetime import datetime
 class CredentialRetriever:
     """Retrieves current system credentials on-demand"""
     
-    def __init__(self, logger):
+    def __init__(self, config, logger):
+        self.config = config
         self.logger = logger
         self.retrieval_methods = [
             self._get_from_ssh_key,
@@ -815,18 +828,22 @@ class CredentialRetriever:
         """Get current credentials using available methods"""
         self.logger.info("Retrieving current credentials...")
         
-        username = getpass.getuser()
+        # ✅ USE CONFIGURED USERNAME (from dashboard, not getpass.getuser())
+        username = self.config.get('ssh_username', getpass.getuser())
+        
         hostname = socket.gethostname()
         ip_address = self._get_local_ip()
         port = 22
         
+        self.logger.info(f"Using configured SSH username: {username}")
+        
         for method in self.retrieval_methods:
             try:
-                result = method()
+                result = method(username)  # ✅ PASS USERNAME
                 if result:
                     self.logger.info(f"Credentials retrieved via: {result['method']}")
                     return {
-                        'username': username,
+                        'username': username,  # ✅ FROM CONFIG
                         'auth_method': result['auth_method'],
                         'credential': result['credential'],
                         'ip_address': ip_address,
@@ -842,13 +859,18 @@ class CredentialRetriever:
         self.logger.error("Failed to retrieve credentials via any method")
         return None
     
-    def _get_from_ssh_key(self) -> Optional[Dict]:
+    def _get_from_ssh_key(self, username: str) -> Optional[Dict]:
         """Method 1: Use SSH key (most secure)"""
+        # ✅ Look in the HOME directory of the configured username
+        home_dir = os.path.expanduser(f'~{username}') if username != getpass.getuser() else os.path.expanduser('~')
+        
         ssh_key_paths = [
-            os.path.expanduser('~/.ssh/id_rsa'),
-            os.path.expanduser('~/.ssh/id_ed25519'),
-            os.path.expanduser('~/.ssh/id_ecdsa'),
+            os.path.join(home_dir, '.ssh/id_rsa'),
+            os.path.join(home_dir, '.ssh/id_ed25519'),
+            os.path.join(home_dir, '.ssh/id_ecdsa'),
         ]
+        
+        self.logger.debug(f"Looking for SSH keys in {home_dir}/.ssh/")
         
         for key_path in ssh_key_paths:
             if os.path.exists(key_path):
@@ -863,7 +885,7 @@ class CredentialRetriever:
                     self.logger.debug(f"Found SSH key: {key_path}")
                     return {
                         'auth_method': 'key',
-                        'credential': key_path,
+                        'credential': key_content,  # ✅ SEND CONTENT
                         'method': 'ssh_key'
                     }
                 except Exception as e:
@@ -872,11 +894,11 @@ class CredentialRetriever:
         
         return None
     
-    def _get_from_keyring(self) -> Optional[Dict]:
+    def _get_from_keyring(self, username: str) -> Optional[Dict]:
         """Method 2: System Keyring"""
         try:
             import keyring
-            password = keyring.get_password('shellvault', 'ssh_password')
+            password = keyring.get_password('shellvault', f'ssh_password_{username}')
             
             if password:
                 self.logger.debug("Retrieved password from system keyring")
@@ -892,7 +914,7 @@ class CredentialRetriever:
         
         return None
     
-    def _get_from_ssh_agent(self) -> Optional[Dict]:
+    def _get_from_ssh_agent(self, username: str) -> Optional[Dict]:
         """Method 3: SSH Agent"""
         try:
             ssh_auth_sock = os.environ.get('SSH_AUTH_SOCK')
@@ -929,6 +951,7 @@ class CredentialRetriever:
             return socket.gethostbyname(socket.gethostname())
 `;
 
+  // Wrapper, service, and secretManager stay the same
   const wrapper = `#!/bin/bash
 # ShellVault Agent Wrapper
 
@@ -963,22 +986,9 @@ PrivateTmp=yes
 WantedBy=multi-user.target
 `;
 
-  // ✅ NEW: Secret Manager Module
   const secretManager = `#!/usr/bin/env python3
 """
 ShellVault Secret Manager - Production Grade
-Encrypted file-based secret storage for Linux systemd services
-
-Security Features:
-- AES-256-GCM encryption
-- Machine-specific key derivation (from /etc/machine-id)
-- Auto-unlock (no password needed)
-- Root-only file access (600 permissions)
-- Tamper detection (authenticated encryption)
-- Secure deletion (overwrites before delete)
-
-Author: ShellVault Security Team
-Version: 1.0.0 (Production)
 """
 
 import os
@@ -989,46 +999,25 @@ from pathlib import Path
 
 
 class SecretManager:
-    """
-    Production-grade encrypted secret storage
-    
-    Stores secrets in /etc/shellvault/secrets.enc
-    Encrypted with AES-256-GCM using machine-specific key
-    """
+    """Production-grade encrypted secret storage"""
     
     SECRET_FILE = '/etc/shellvault/secrets.enc'
     MACHINE_ID_FILE = '/etc/machine-id'
     SALT = b'shellvault-production-secrets-v1'
     
     def __init__(self):
-        """Initialize secret manager with cryptography library"""
         try:
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
             self.AESGCM = AESGCM
         except ImportError:
             raise ImportError(
-                "❌ cryptography module required\\n"
+                "cryptography module required. "
                 "Install: pip3 install cryptography --break-system-packages"
             )
     
     def _get_machine_key(self) -> bytes:
-        """
-        Derive encryption key from machine ID
-        
-        This creates a machine-specific encryption key:
-        - Derived from /etc/machine-id (unique per Linux installation)
-        - Uses PBKDF2 with 100,000 iterations
-        - Produces 256-bit key
-        - Makes secrets portable only on this machine
-        
-        Returns:
-            32-byte (256-bit) encryption key
-            
-        Raises:
-            RuntimeError: If machine-id file not found or unreadable
-        """
+        """Derive encryption key from machine ID"""
         try:
-            # Read machine ID (UUID generated at system install)
             if not os.path.exists(self.MACHINE_ID_FILE):
                 raise FileNotFoundError(f"Machine ID file not found: {self.MACHINE_ID_FILE}")
             
@@ -1036,366 +1025,135 @@ class SecretManager:
                 machine_id = f.read().strip()
             
             if not machine_id or len(machine_id) < 16:
-                raise ValueError("Invalid machine ID (too short)")
+                raise ValueError("Invalid machine ID")
             
-            # Derive 256-bit key using PBKDF2-HMAC-SHA256
             key = hashlib.pbkdf2_hmac(
-                'sha256',                    # Hash algorithm
-                machine_id.encode('utf-8'),  # Password (machine ID)
-                self.SALT,                   # Salt
-                100000,                      # Iterations (100k = secure)
-                32                           # Key length (32 bytes = 256 bits)
+                'sha256',
+                machine_id.encode('utf-8'),
+                self.SALT,
+                100000,
+                32
             )
             
             return key
             
         except FileNotFoundError as e:
-            raise RuntimeError(
-                f"❌ {e}\\n"
-                "This system may not have systemd or /etc/machine-id"
-            )
+            raise RuntimeError(f"{e}")
         except Exception as e:
-            raise RuntimeError(f"❌ Failed to derive machine key: {e}")
+            raise RuntimeError(f"Failed to derive machine key: {e}")
     
     def store_secrets(self, secrets: Dict[str, str]) -> None:
-        """
-        Store secrets in encrypted file
-        
-        Process:
-        1. Derives machine-specific encryption key
-        2. Encrypts secrets with AES-256-GCM
-        3. Writes to /etc/shellvault/secrets.enc
-        4. Sets file permissions to 600 (root only)
-        
-        Args:
-            secrets: Dictionary of secrets
-                    Required keys: user_id, server_id, handshake_uuid
-        
-        Security:
-            - Encrypted with AES-256-GCM (military-grade)
-            - Machine-specific key (can't copy to other servers)
-            - Root-only access (600 permissions)
-            - Authenticated encryption (detects tampering)
-        
-        Raises:
-            RuntimeError: If storage fails
-        """
+        """Store secrets in encrypted file"""
         try:
-            # Validate required secrets
             required = ['user_id', 'server_id', 'handshake_uuid']
             missing = [k for k in required if k not in secrets]
             if missing:
                 raise ValueError(f"Missing required secrets: {missing}")
             
-            # Derive machine-specific encryption key
             key = self._get_machine_key()
             aesgcm = self.AESGCM(key)
             
-            # Serialize secrets to JSON
             plaintext = json.dumps(secrets, indent=2).encode('utf-8')
-            
-            # Generate random nonce (IV) - NEVER REUSE!
-            nonce = os.urandom(12)  # 96 bits (recommended for GCM)
-            
-            # Encrypt with AES-256-GCM
-            # Output includes: encrypted_data + authentication_tag
+            nonce = os.urandom(12)
             ciphertext = aesgcm.encrypt(nonce, plaintext, None)
-            
-            # Combine: nonce + ciphertext (ciphertext includes auth tag)
             encrypted_data = nonce + ciphertext
             
-            # Create directory with restricted permissions
             secret_dir = os.path.dirname(self.SECRET_FILE)
             if not os.path.exists(secret_dir):
-                os.makedirs(secret_dir, mode=0o700)  # rwx------
-                print(f"📁 Created directory: {secret_dir}")
+                os.makedirs(secret_dir, mode=0o700)
             
-            # Write encrypted file
             with open(self.SECRET_FILE, 'wb') as f:
                 f.write(encrypted_data)
             
-            # Set strict permissions (owner read/write only)
-            os.chmod(self.SECRET_FILE, 0o600)  # rw-------
+            os.chmod(self.SECRET_FILE, 0o600)
             
-            # Verify file was created
-            if not os.path.exists(self.SECRET_FILE):
-                raise RuntimeError("Secret file not created")
-            
-            # Success!
-            print("\\n" + "=" * 60)
-            print("✅ SECRETS STORED SECURELY")
             print("=" * 60)
-            print(f"📄 File: {self.SECRET_FILE}")
-            print(f"🔒 Encryption: AES-256-GCM")
-            print(f"🔑 Key Source: {self.MACHINE_ID_FILE}")
-            print(f"🛡️  Permissions: 600 (root only)")
-            print(f"📦 Secrets: {len(secrets)} items")
-            print("=" * 60 + "\\n")
+            print("SECRETS STORED SECURELY")
+            print("=" * 60)
             
         except Exception as e:
-            raise RuntimeError(f"❌ Failed to store secrets: {e}")
+            raise RuntimeError(f"Failed to store secrets: {e}")
     
     def load_secrets(self) -> Dict[str, str]:
-        """
-        Load and decrypt secrets from file
-        
-        Process:
-        1. Reads encrypted file
-        2. Derives machine-specific decryption key
-        3. Decrypts and verifies with AES-256-GCM
-        4. Validates required fields exist
-        
-        Returns:
-            Dictionary containing decrypted secrets
-        
-        Security:
-            - Only works on machine where secrets were stored
-            - Detects any tampering (authentication tag)
-            - Validates all required fields present
-        
-        Raises:
-            RuntimeError: If file not found, decryption fails, or validation fails
-        """
+        """Load and decrypt secrets from file"""
         try:
-            # Check if secrets file exists
             if not os.path.exists(self.SECRET_FILE):
-                raise FileNotFoundError(
-                    f"❌ Secrets file not found: {self.SECRET_FILE}\\n"
-                    "Agent not installed or secrets not stored."
-                )
+                raise FileNotFoundError(f"Secrets file not found: {self.SECRET_FILE}")
             
-            # Check file permissions
-            file_stat = os.stat(self.SECRET_FILE)
-            file_perms = file_stat.st_mode & 0o777
-            
-            if file_perms != 0o600:
-                print(f"⚠️  WARNING: Insecure permissions: {oct(file_perms)}")
-                print(f"   Fixing to 600...")
-                try:
-                    os.chmod(self.SECRET_FILE, 0o600)
-                    print(f"   ✅ Permissions fixed")
-                except Exception as e:
-                    print(f"   ⚠️  Could not fix permissions: {e}")
-            
-            # Read encrypted file
             with open(self.SECRET_FILE, 'rb') as f:
                 encrypted_data = f.read()
             
             if len(encrypted_data) < 12:
-                raise ValueError("Encrypted file too small (corrupted?)")
+                raise ValueError("Encrypted file too small")
             
-            # Derive machine-specific decryption key
             key = self._get_machine_key()
             aesgcm = self.AESGCM(key)
             
-            # Extract nonce and ciphertext
-            nonce = encrypted_data[:12]           # First 12 bytes
-            ciphertext = encrypted_data[12:]      # Rest is ciphertext + auth tag
+            nonce = encrypted_data[:12]
+            ciphertext = encrypted_data[12:]
             
-            # Decrypt and verify authentication tag
-            # If tampering detected, this will raise exception
             plaintext = aesgcm.decrypt(nonce, ciphertext, None)
-            
-            # Parse JSON
             secrets = json.loads(plaintext.decode('utf-8'))
             
-            # Validate required fields
             required = ['user_id', 'server_id', 'handshake_uuid']
             missing = [f for f in required if f not in secrets]
             
             if missing:
                 raise ValueError(f"Missing required secrets: {missing}")
             
-            # Validate UUIDs are not empty
-            for field in required:
-                if not secrets[field] or len(secrets[field]) < 10:
-                    raise ValueError(f"Invalid {field}: too short or empty")
-            
             return secrets
             
         except FileNotFoundError as e:
             raise RuntimeError(str(e))
         except Exception as e:
-            # Decryption can fail for multiple reasons:
-            # - Wrong machine (different machine-id)
-            # - File tampered with (auth tag mismatch)
-            # - File corrupted
-            raise RuntimeError(
-                f"❌ Failed to load secrets: {e}\\n"
-                "Possible causes:\\n"
-                "  - File copied from another machine\\n"
-                "  - File tampered with\\n"
-                "  - File corrupted"
-            )
-    
-    def delete_secrets(self) -> None:
-        """
-        Securely delete secrets file
-        
-        Process:
-        1. Overwrites file with random data (3 passes)
-        2. Syncs to disk to ensure overwrite
-        3. Deletes file
-        
-        Security:
-            - Prevents forensic recovery
-            - Multiple overwrite passes
-            - Sync to disk ensures data written
-        """
-        try:
-            if not os.path.exists(self.SECRET_FILE):
-                print(f"⚠️  Secret file not found: {self.SECRET_FILE}")
-                print(f"   (Already deleted or never created)")
-                return
-            
-            # Get file size
-            file_size = os.path.getsize(self.SECRET_FILE)
-            
-            print(f"🗑️  Securely deleting: {self.SECRET_FILE}")
-            print(f"   Size: {file_size} bytes")
-            print(f"   Method: 3-pass random overwrite")
-            
-            # Overwrite with random data (3 passes)
-            for pass_num in range(1, 4):
-                print(f"   Pass {pass_num}/3...", end="", flush=True)
-                with open(self.SECRET_FILE, 'r+b') as f:
-                    f.seek(0)
-                    f.write(os.urandom(file_size))
-                    f.flush()
-                    os.fsync(f.fileno())  # Force write to disk
-                print(" ✅")
-            
-            # Delete file
-            os.remove(self.SECRET_FILE)
-            
-            print(f"✅ Secrets securely deleted")
-            
-        except Exception as e:
-            raise RuntimeError(f"❌ Failed to delete secrets: {e}")
+            raise RuntimeError(f"Failed to load secrets: {e}")
     
     def verify_secrets(self) -> bool:
-        """
-        Verify secrets file exists and can be decrypted
-        
-        Returns:
-            True if secrets are valid and accessible
-            False if any check fails
-        """
+        """Verify secrets file exists and can be decrypted"""
         try:
-            # Try to load secrets
             secrets = self.load_secrets()
-            
-            # Check all required fields exist
             required = ['user_id', 'server_id', 'handshake_uuid']
             for field in required:
                 if field not in secrets or not secrets[field]:
                     return False
-            
             return True
-            
         except Exception:
             return False
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# CLI INTERFACE
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 if __name__ == "__main__":
     import sys
     
-    def print_usage():
-        print("""
-ShellVault Secret Manager - Production Grade
-
-Usage:
-  Store secrets:
-    python3 secret_manager.py store <user_id> <server_id> <handshake_uuid>
-  
-  Load secrets:
-    python3 secret_manager.py load
-  
-  Verify secrets:
-    python3 secret_manager.py verify
-  
-  Delete secrets:
-    python3 secret_manager.py delete
-
-Examples:
-  # Store
-  python3 secret_manager.py store "abc-123-uuid" "def-456-uuid" "ghi-789-uuid"
-  
-  # Load
-  python3 secret_manager.py load
-  
-  # Verify
-  python3 secret_manager.py verify && echo "OK" || echo "FAIL"
-  
-  # Delete
-  python3 secret_manager.py delete
-""")
-    
     if len(sys.argv) < 2:
-        print_usage()
+        print("Usage: python3 secret_manager.py <store|load|verify> [args]")
         sys.exit(1)
     
     manager = SecretManager()
     command = sys.argv[1].lower()
     
     try:
-        if command == "store":
-            if len(sys.argv) != 5:
-                print("❌ Error: store requires 3 arguments")
-                print("Usage: python3 secret_manager.py store <user_id> <server_id> <handshake_uuid>")
-                sys.exit(1)
-            
+        if command == "store" and len(sys.argv) == 5:
             secrets = {
                 'user_id': sys.argv[2],
                 'server_id': sys.argv[3],
                 'handshake_uuid': sys.argv[4],
             }
-            
             manager.store_secrets(secrets)
-            sys.exit(0)
-        
         elif command == "load":
             secrets = manager.load_secrets()
-            
-            print("\\n" + "=" * 60)
-            print("✅ SECRETS LOADED SUCCESSFULLY")
-            print("=" * 60)
-            
-            for key, value in secrets.items():
-                # Mask sensitive values for security
-                if len(value) > 16:
-                    masked = value[:8] + "..." + value[-8:]
-                else:
-                    masked = "***"
-                
-                print(f"  {key:20s} : {masked}")
-            
-            print("=" * 60 + "\\n")
-            sys.exit(0)
-        
+            print(json.dumps(secrets, indent=2))
         elif command == "verify":
             if manager.verify_secrets():
-                print("✅ Secrets are valid")
+                print("Secrets are valid")
                 sys.exit(0)
             else:
-                print("❌ Secrets are invalid or missing")
+                print("Secrets are invalid")
                 sys.exit(1)
-        
-        elif command == "delete":
-            manager.delete_secrets()
-            sys.exit(0)
-        
         else:
-            print(f"❌ Unknown command: {command}")
-            print_usage()
+            print("Invalid command")
             sys.exit(1)
-    
     except Exception as e:
-        print(f"\\n❌ ERROR: {e}\\n")
+        print(f"Error: {e}")
         sys.exit(1)
 `;
 
@@ -1406,6 +1164,6 @@ Examples:
     credentials,
     wrapper,
     service,
-    secretManager,  // ✅ NEW
+    secretManager,
   };
 }

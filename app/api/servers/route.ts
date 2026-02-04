@@ -1,4 +1,5 @@
 // app/api/servers/route.ts
+// ✅ UPDATED: Passes sshUsername to AgentInstaller
 
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/client';
@@ -103,6 +104,7 @@ export async function POST(request: NextRequest) {
           serverId: server.id,
           userId,
           host: validatedData.ipAddress,
+          sshUsername: validatedData.sshUsername,  // ✅ LOG IT
         });
 
         const installer = new AgentInstaller(
@@ -117,6 +119,7 @@ export async function POST(request: NextRequest) {
             serverId: server.id,
             handshakeUuid: server.handshakeUuid,
             brokerUrl: process.env.AGENT_BROKER_URL || 'wss://broker.shellvault.com',
+            sshUsername: validatedData.sshUsername,  // ✅ PASS IT
           }
         );
 
@@ -142,6 +145,7 @@ export async function POST(request: NextRequest) {
           logger.info('Agent installed successfully', {
             serverId: server.id,
             version: installResult.agentVersion,
+            sshUsername: validatedData.sshUsername,  // ✅ CONFIRM
           });
         } else {
           // Installation failed - update status
@@ -191,6 +195,7 @@ export async function POST(request: NextRequest) {
         serverId: server.id,
         ipAddress: server.ipAddress,
         hostname: server.hostname,
+        sshUsername: server.sshUsername,
         tags: server.tags,
         agentInstalled: installResult?.success || false,
       },

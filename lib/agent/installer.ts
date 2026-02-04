@@ -1,5 +1,5 @@
 // lib/agent/installer.ts
-// ✅ PRODUCTION: Encrypted vault storage + AES-256-GCM
+// ✅ PRODUCTION: SSH Key Validation + Encrypted vault storage + AES-256-GCM + SSH Username
 
 import { SSHClient, SSHConfig } from '@/lib/ssh/client';
 import logger from '@/lib/logger';
@@ -10,6 +10,7 @@ export interface AgentConfig {
   serverId: string;
   handshakeUuid: string;
   brokerUrl: string;
+  sshUsername: string;
 }
 
 export interface InstallResult {
@@ -34,11 +35,11 @@ export class AgentInstaller {
   }
 
   /**
-   * ✅ PRODUCTION: Install agent with encrypted vault secrets and AES-256-GCM crypto
+   * ✅ PRODUCTION: Install agent with SSH validation, encrypted vault secrets and AES-256-GCM crypto
    */
   async install(): Promise<InstallResult> {
     try {
-      logger.info('[PRODUCTION] Installing agent with encrypted vault + AES-256-GCM...');
+      logger.info('[PRODUCTION] Installing agent with SSH validation + encrypted vault + AES-256-GCM...');
 
       // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       // STEP 1: Connect
@@ -77,6 +78,17 @@ export class AgentInstaller {
       logger.info('Sudo access confirmed');
 
       // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      // ✅ NEW STEP 5.5: Validate SSH Key Setup (CRITICAL!)
+      // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      logger.info('═══════════════════════════════════════════');
+      logger.info('VALIDATING SSH KEY AUTHENTICATION');
+      logger.info('═══════════════════════════════════════════');
+      await this.validateSshKeySetup();
+      logger.info('═══════════════════════════════════════════');
+      logger.info('✅ SSH KEY VALIDATION COMPLETE');
+      logger.info('═══════════════════════════════════════════');
+
+      // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       // STEP 6: Clean up old installation
       // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       logger.info('Cleaning up old installation...');
@@ -84,7 +96,7 @@ export class AgentInstaller {
       await this.sshClient.executeSudoCommand('systemctl disable shellvault-agent 2>/dev/null || true');
       await this.sshClient.executeSudoCommand('rm -rf /usr/local/lib/shellvault');
       await this.sshClient.executeSudoCommand('rm -f /usr/local/bin/shellvault-agent');
-      await this.sshClient.executeSudoCommand('rm -rf /etc/shellvault');  // ✅ Clean old secrets
+      await this.sshClient.executeSudoCommand('rm -rf /etc/shellvault');
 
       // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       // STEP 7: Create directories
@@ -92,17 +104,20 @@ export class AgentInstaller {
       logger.info('Creating directory structure...');
       await this.sshClient.executeSudoCommand('mkdir -p /usr/local/lib/shellvault');
       await this.sshClient.executeSudoCommand('mkdir -p /var/log/shellvault');
-      await this.sshClient.executeSudoCommand('mkdir -p /etc/shellvault');  // ✅ For secrets vault
+      await this.sshClient.executeSudoCommand('mkdir -p /etc/shellvault');
 
       // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      // ✅ STEP 8: Generate agent modules (with secret_manager)
+      // ✅ STEP 8: Generate agent modules (with sshUsername)
       // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       logger.info('Generating agent modules...');
+      logger.info(`SSH Username: ${this.agentConfig.sshUsername}`);
+      
       const agent = generateModularAgent({
         userId: this.agentConfig.userId,
         serverId: this.agentConfig.serverId,
         handshakeUuid: this.agentConfig.handshakeUuid,
         brokerUrl: this.agentConfig.brokerUrl,
+        sshUsername: this.agentConfig.sshUsername,
         heartbeatUrl: process.env.NEXT_PUBLIC_APP_URL
           ? `${process.env.NEXT_PUBLIC_APP_URL}/api/agent/heartbeat`
           : 'http://172.20.10.3:3000/api/agent/heartbeat',
@@ -213,6 +228,8 @@ export class AgentInstaller {
       }
 
       logger.info('✅ Production agent installed successfully!');
+      logger.info(`   - SSH Username: ${this.agentConfig.sshUsername}`);
+      logger.info('   - SSH Key Authentication: ✅ VALIDATED');
       logger.info('   - AES-256-GCM encryption: ✅');
       logger.info('   - Encrypted vault storage: ✅');
       logger.info('   - Machine-bound secrets: ✅');
@@ -239,6 +256,137 @@ export class AgentInstaller {
     } finally {
       this.sshClient.disconnect();
     }
+  }
+
+  /**
+   * ✅ NEW: Validate and setup SSH key authentication
+   */
+  private async validateSshKeySetup(): Promise<void> {
+    const username = this.agentConfig.sshUsername;
+    const homeDir = username === 'root' ? '/root' : `/home/${username}`;
+    const sshDir = `${homeDir}/.ssh`;
+    const keyPath = `${sshDir}/id_rsa`;
+    const pubKeyPath = `${keyPath}.pub`;
+    const authKeysPath = `${sshDir}/authorized_keys`;
+
+    logger.info(`Target user: ${username}`);
+    logger.info(`SSH directory: ${sshDir}`);
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // STEP 1: Check/Create .ssh directory
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    const sshDirCheck = await this.sshClient.executeCommand(`test -d ${sshDir} && echo exists`);
+    
+    if (!sshDirCheck.stdout.includes('exists')) {
+      logger.info('Creating .ssh directory...');
+      await this.sshClient.executeCommand(`mkdir -p ${sshDir}`);
+      await this.sshClient.executeCommand(`chmod 700 ${sshDir}`);
+      logger.info('✅ Created .ssh directory');
+    } else {
+      logger.info('✅ .ssh directory exists');
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // STEP 2: Check SSH key exists (or generate)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    logger.info('Checking for SSH key...');
+    const keyCheck = await this.sshClient.executeCommand(`test -f ${keyPath} && echo exists`);
+    
+    if (!keyCheck.stdout.includes('exists')) {
+      logger.info('SSH key not found, generating new key...');
+      const keygenResult = await this.sshClient.executeCommand(
+        `ssh-keygen -t rsa -b 4096 -f ${keyPath} -N "" -C "shellvault-${username}@$(hostname)"`
+      );
+      
+      if (keygenResult.exitCode !== 0) {
+        throw new Error(`Failed to generate SSH key: ${keygenResult.stderr}`);
+      }
+      
+      // Set permissions
+      await this.sshClient.executeCommand(`chmod 600 ${keyPath}`);
+      await this.sshClient.executeCommand(`chmod 644 ${pubKeyPath}`);
+      
+      logger.info('✅ Generated new SSH key');
+    } else {
+      logger.info('✅ SSH key already exists');
+      
+      // Ensure correct permissions
+      await this.sshClient.executeCommand(`chmod 600 ${keyPath}`);
+      await this.sshClient.executeCommand(`chmod 644 ${pubKeyPath}`);
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // STEP 3: Ensure public key is in authorized_keys
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    logger.info('Checking authorized_keys...');
+    
+    // Check if authorized_keys exists
+    const authKeysExists = await this.sshClient.executeCommand(
+      `test -f ${authKeysPath} && echo exists`
+    );
+    
+    // Check if our public key is already in authorized_keys
+    const keyAuthorized = await this.sshClient.executeCommand(
+      `test -f ${authKeysPath} && grep -qF "$(cat ${pubKeyPath})" ${authKeysPath} && echo authorized`
+    );
+    
+    if (!keyAuthorized.stdout.includes('authorized')) {
+      logger.info('Adding public key to authorized_keys...');
+      
+      // Create file if it doesn't exist, then append
+      if (!authKeysExists.stdout.includes('exists')) {
+        await this.sshClient.executeCommand(`touch ${authKeysPath}`);
+      }
+      
+      await this.sshClient.executeCommand(`cat ${pubKeyPath} >> ${authKeysPath}`);
+      await this.sshClient.executeCommand(`chmod 600 ${authKeysPath}`);
+      
+      logger.info('✅ Added public key to authorized_keys');
+    } else {
+      logger.info('✅ Public key already authorized');
+      
+      // Ensure correct permissions
+      await this.sshClient.executeCommand(`chmod 600 ${authKeysPath}`);
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // STEP 4: CRITICAL - Test SSH key authentication works!
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    logger.info('Testing SSH key authentication...');
+    logger.info(`Test command: ssh -i ${keyPath} ${username}@localhost`);
+    
+    const sshTest = await this.sshClient.executeCommand(
+      `ssh -i ${keyPath} ` +
+      `-o StrictHostKeyChecking=no ` +
+      `-o PasswordAuthentication=no ` +
+      `-o BatchMode=yes ` +
+      `-o ConnectTimeout=10 ` +
+      `${username}@localhost "echo SSH_AUTH_SUCCESS"`
+    );
+    
+    if (!sshTest.stdout.includes('SSH_AUTH_SUCCESS')) {
+      logger.error('SSH key authentication test FAILED');
+      logger.error('Command output:', sshTest.stdout);
+      logger.error('Command error:', sshTest.stderr);
+      logger.error('Exit code:', sshTest.exitCode);
+      
+      throw new Error(
+        `SSH key authentication test failed!\n` +
+        `The agent will not be able to provide SSH access.\n` +
+        `Error: ${sshTest.stderr || 'Authentication rejected'}\n\n` +
+        `Troubleshooting:\n` +
+        `1. Check SSH server config: /etc/ssh/sshd_config\n` +
+        `   Ensure: PubkeyAuthentication yes\n` +
+        `2. Check SSH logs on server: sudo tail -f /var/log/auth.log\n` +
+        `3. Verify permissions:\n` +
+        `   chmod 700 ${sshDir}\n` +
+        `   chmod 600 ${keyPath}\n` +
+        `   chmod 600 ${authKeysPath}`
+      );
+    }
+    
+    logger.info('✅ SSH key authentication test PASSED');
+    logger.info(`   SSH will work for: ${username}@localhost`);
   }
 
   /**

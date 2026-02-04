@@ -34,7 +34,7 @@ const loginSchema = z.object({
 
 // Rate limiting (in-memory for now, Redis in production)
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
-const MAX_ATTEMPTS_PER_IP = 5;
+const MAX_ATTEMPTS_PER_IP = 100;
 const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour
 
 // Account lockout

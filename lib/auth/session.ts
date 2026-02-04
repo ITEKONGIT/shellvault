@@ -23,7 +23,7 @@ export interface CurrentUser {
 export async function getCurrentUser(): Promise<CurrentUser | null> {
   try {
     const cookieStore = await cookies();
-    const token = cookieStore.get('auth_token')?.value;
+    const token = cookieStore.get('access_token')?.value;
 
     if (!token) {
       return null;
@@ -82,7 +82,7 @@ export async function requireAuth(): Promise<CurrentUser> {
 export async function getCurrentUserId(): Promise<string | null> {
   try {
     const cookieStore = await cookies();
-    const token = cookieStore.get('auth_token')?.value;
+    const token = cookieStore.get('access_token')?.value;
 
     if (!token) {
       return null;
