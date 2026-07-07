@@ -1,35 +1,19 @@
 // types/global.d.ts
 /**
  * Global type declarations for ShellVault
+ *
+ * ⚠️ All new types should be added to types/engine.ts.
+ * This file maintains backward compatibility for global declarations.
  */
 
+import type { BrokerInterface, RetrievedCredentials } from './engine';
+
 declare global {
-  // ✅ Broker API types
-  var shellVaultBroker:
-    | {
-        requestCredentials: (
-          serverId: string,
-          sessionId: string
-        ) => Promise<{
-          username: string;
-          auth_method: 'key' | 'password';
-          credential: string;
-          ip_address: string;
-          port: number;
-          hostname: string;
-          method_used?: string;
-        }>;
-        getAgent: (serverId: string) => {
-          ws: any;
-          userId: string;
-          serverId: string;
-          handshakeTier: number;
-          authenticated: boolean;
-          connectedAt: Date;
-        } | undefined;
-        agents: Map<string, any>;
-      }
-    | undefined;
+  /**
+   * Broker API interface (legacy — prefer dependency injection)
+   * @deprecated Use service registry instead of globals
+   */
+  var shellVaultBroker: BrokerInterface | undefined;
 }
 
 export {};

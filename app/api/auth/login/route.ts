@@ -16,15 +16,14 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { PrismaClient } from '@prisma/client';
+import { auditLog } from '@/lib/logger/audit';
 import { verifyTOTP } from '@/lib/auth/totp';
 import { generateTokenPair } from '@/lib/auth/jwt';
 import { setAuthCookies } from '@/lib/auth/cookies';
 import { createSession } from '@/lib/redis/session-store';
 import logger from '@/lib/logger';
 import { logAuditEvent } from '@/lib/utils/audit';
-
-const prisma = new PrismaClient();
+import { prisma } from '@/lib/db/client';
 
 // Validation schema
 const loginSchema = z.object({

@@ -4,10 +4,8 @@
  * Provides helper function for logging audit events to the database.
  */
 
-import { PrismaClient } from '@prisma/client';
 import logger from '@/lib/logger';
-
-const prisma = new PrismaClient();
+import { prisma } from '@/lib/db/client';
 
 export interface AuditEventData {
   userId?: string;

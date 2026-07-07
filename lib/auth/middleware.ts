@@ -32,13 +32,11 @@
  */
 
 import { NextRequest } from 'next/server';
-import { PrismaClient } from '@prisma/client';
 import { verifyAccessToken } from '@/lib/auth/jwt';
 import { getTokensFromCookies } from '@/lib/auth/cookies';
 import { getSession, updateLastActivity } from '@/lib/redis/session-store';
 import logger from '@/lib/logger';
-
-const prisma = new PrismaClient();
+import { prisma } from '@/lib/db/client';
 
 /**
  * Authenticated user type
