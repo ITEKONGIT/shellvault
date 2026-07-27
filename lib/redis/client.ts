@@ -18,18 +18,25 @@ const REDIS_CONFIG = {
   // Connection settings
   maxRetriesPerRequest: 3,
   enableReadyCheck: true,
-  enableOfflineQueue: true,
+  enableOfflineQueue: false,
   
   // Reconnection strategy
   retryStrategy: (times: number) => {
-    const delay = Math.min(times * 50, 2000);
-    logger.warn(`Redis reconnection attempt ${times}, delay: ${delay}ms`);
+    if (times > 20) {
+      logger.error('Redis reconnection limit reached; stopping retries');
+      return null;
+    }
+
+    const delay = Math.min(250 * Math.pow(2, times - 1), 5000);
+    if (times <= 3 || times % 5 === 0) {
+      logger.warn(`Redis reconnection attempt ${times}, delay: ${delay}ms`);
+    }
     return delay;
   },
   
   // Timeouts
   connectTimeout: 10000,
-  lazyConnect: false,
+  lazyConnect: true,
 };
 
 /**
@@ -85,7 +92,9 @@ class RedisClient {
         logger.info('Redis reconnecting...');
       });
 
-      // Wait for connection
+      // Wait for connection before issuing commands. With offline queue disabled,
+      // commands sent before the socket is writable fail immediately.
+      await this.instance.connect();
       await this.instance.ping();
       logger.info('Redis ping successful');
 

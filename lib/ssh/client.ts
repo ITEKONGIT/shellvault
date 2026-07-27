@@ -8,6 +8,7 @@ export interface SSHConfig {
   port: number;
   username: string;
   password: string;
+  expectedHostKeyFingerprint?: string;
 }
 
 export interface SSHCommandResult {
@@ -52,6 +53,12 @@ export class SSHClient {
           password: this.config.password,
           readyTimeout: 30000,
           keepaliveInterval: 10000,
+          ...(this.config.expectedHostKeyFingerprint && {
+            hostHash: 'sha256',
+            hostVerifier: (hashedKey: string) => {
+              return normalizeFingerprint(hashedKey) === normalizeFingerprint(this.config.expectedHostKeyFingerprint!);
+            },
+          }),
         });
     });
   }
@@ -244,4 +251,11 @@ export class SSHClient {
       this.client = null;
     }
   }
+}
+
+function normalizeFingerprint(fingerprint: string): string {
+  return fingerprint
+    .trim()
+    .replace(/^SHA256:/i, '')
+    .replace(/=+$/g, '');
 }

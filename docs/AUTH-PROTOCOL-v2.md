@@ -282,7 +282,7 @@ All encryption keys are derived using **Scrypt**:
 
 ```
 scrypt(
-  password = user_uuid,
+  password = handshake_uuid,
   salt = 'shellvault-secure-salt-v1',
   N = 16384,
   r = 8,
@@ -291,7 +291,7 @@ scrypt(
 )
 ```
 
-**Why Scrypt**: Memory-hard against GPU attacks. The user UUID is known to both broker (from database) and agent (from encrypted vault).
+**Why Scrypt**: Memory-hard against GPU attacks. The handshake UUID is known to the broker from the database and to the agent from its encrypted local vault. Public identifiers such as `userId` and `serverId` must not be used as encryption secrets.
 
 ### 5.3 Challenge Payload Structure
 
@@ -323,8 +323,8 @@ Before encryption, the plaintext challenge is a JSON object:
 {
   tier: 2,
   challengeId: string,
+  nonce: string,
   metadata: {
-    expectedHandshakeUuid: string,
     verifyHostname: true,
     timestamp: string
   }
@@ -337,7 +337,7 @@ Before encryption, the plaintext challenge is a JSON object:
   tier: 2,
   challengeId: string,
   hostname: string,          // gethostname()
-  handshakeUuid: string,
+  proof: string,             // HMAC-SHA256(handshake_uuid, challengeId:nonce:serverId:hostname)
   serverFingerprint: string, // SHA-256(handshake_uuid + ":" + hostname + ":" + serverId)
   verified: true
 }
@@ -435,8 +435,8 @@ Jitter: ±20% randomization
 ## 8. Security Considerations
 
 ### 8.1 Secrets Never Transmitted
-- `handshake_uuid` is never sent over the wire in plaintext
-- Only its SHA-256 hash with a nonce is transmitted
+- `handshake_uuid` is never sent over the wire
+- Only a nonce-bound HMAC proof is transmitted
 - Even if the hash is intercepted, it cannot be reversed without the UUID
 
 ### 8.2 Machine-Binding

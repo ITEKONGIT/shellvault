@@ -118,6 +118,7 @@ const injectXtermStyles = () => {
 
 interface SSHTerminalProps {
   sessionId: string;
+  terminalGrant: string;
   serverName: string;
   onClose: () => void;
   onError: (error: string) => void;
@@ -128,6 +129,7 @@ const BROKER_WS_URL = process.env.NEXT_PUBLIC_BROKER_WS_URL || 'ws://localhost:8
 
 export default function SSHTerminal({
   sessionId,
+  terminalGrant,
   serverName,
   onClose,
   onError
@@ -218,8 +220,9 @@ export default function SSHTerminal({
   useEffect(() => {
     if (!terminal || !sessionId) return;
 
-    // ✅ CHANGED: Connect to broker's SSH stream endpoint
-    const wsUrl = `${BROKER_WS_URL}/api/ssh/stream?sessionId=${sessionId}`;
+    // Connect to broker's SSH stream endpoint. The terminal grant is sent
+    // as the first WebSocket message, not in the URL.
+    const wsUrl = `${BROKER_WS_URL}/api/ssh/stream`;
 
     terminal.writeln('\x1b[33m🔐 Connecting to ShellVault SSH...\x1b[0m');
     terminal.writeln(`\x1b[90m   Server: ${serverName}\x1b[0m`);
@@ -229,6 +232,11 @@ export default function SSHTerminal({
     socket.onopen = () => {
       setConnected(true);
       setReconnecting(false);
+      socket.send(JSON.stringify({
+        type: 'terminal_auth',
+        sessionId,
+        terminalGrant,
+      }));
       terminal.writeln('\x1b[32m✓ Connected\x1b[0m');
       terminal.writeln('');
 
@@ -290,7 +298,7 @@ export default function SSHTerminal({
         socket.close();
       }
     };
-  }, [terminal, sessionId, fitAddon, onError, serverName]);
+  }, [terminal, sessionId, terminalGrant, fitAddon, onError, serverName]);
 
   // Handle resize events
   useEffect(() => {

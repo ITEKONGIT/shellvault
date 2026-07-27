@@ -23,9 +23,6 @@ const SSHTerminal = dynamic(() => import('@/components/terminal/SSHTerminal'), {
   ),
 });
 
-// ✅ ADDED: Broker URL for SSH connect
-const BROKER_URL = process.env.NEXT_PUBLIC_BROKER_URL || 'http://localhost:8080';
-
 interface Server {
   id: string;
   name: string;
@@ -50,6 +47,7 @@ interface Server {
 interface TerminalSession {
   sessionId: string;
   serverName: string;
+  terminalGrant: string;
 }
 
 export default function ServerDetailsPage({
@@ -117,39 +115,16 @@ export default function ServerDetailsPage({
         throw new Error(spawnData.error || spawnData.details || 'Failed to get credentials');
       }
 
-      console.log('Credentials received:', spawnData);
-
-      // ✅ CHANGED: Step 2: Establish SSH connection via BROKER (not Next.js)
-      const connectResponse = await fetch(`${BROKER_URL}/api/ssh/connect`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          sessionId: spawnData.sessionId,
-          credentials: {
-            username: spawnData.credentials.username,
-            auth_method: spawnData.credentials.authMethod,
-            credential: spawnData.credentials.keyPath || '',
-            ip_address: spawnData.server.ipAddress,
-            port: server.port,
-            hostname: spawnData.server.hostname,
-          },
-        }),
+      console.log('Terminal session prepared:', {
+        sessionId: spawnData.sessionId,
+        serverId: server.id,
       });
-
-      const connectData = await connectResponse.json();
-
-      if (!connectResponse.ok || !connectData.success) {
-        throw new Error(connectData.error || 'Failed to establish SSH connection');
-      }
-
-      console.log('SSH connection established:', connectData);
 
       // Success! Open terminal
       setTerminalSession({
         sessionId: spawnData.sessionId,
         serverName: server.name,
+        terminalGrant: spawnData.terminalGrant,
       });
 
     } catch (err: any) {
@@ -244,6 +219,7 @@ export default function ServerDetailsPage({
       <div className="h-screen bg-zinc-950">
         <SSHTerminal
           sessionId={terminalSession.sessionId}
+          terminalGrant={terminalSession.terminalGrant}
           serverName={terminalSession.serverName}
           onClose={handleTerminalClose}
           onError={handleTerminalError}

@@ -172,6 +172,7 @@ Transport Layer - All Communication
 
 import json
 import hashlib
+import hmac
 import time
 import socket
 import base64
@@ -289,15 +290,22 @@ class HandshakeHandler:
     def handle_tier2(self, challenge: dict) -> dict:
         """TIER 2: Identity Verification"""
         challenge_id = challenge.get('challenge_id')
+        nonce = challenge.get('nonce')
         hostname = socket.gethostname()
         fingerprint = self.crypto.hash(f"{self.config['handshake_uuid']}:{hostname}:{self.config['server_id']}")
+        proof_message = f"{challenge_id}:{nonce}:{self.config['server_id']}:{hostname}"
+        proof = hmac.new(
+            self.config['handshake_uuid'].encode('utf-8'),
+            proof_message.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
         self.tier = 2
         
         return {
             'tier': 2,
             'challenge_id': challenge_id,
             'hostname': hostname,
-            'handshake_uuid': self.config['handshake_uuid'],
+            'proof': proof,
             'server_fingerprint': fingerprint,
             'verified': True
         }
@@ -595,7 +603,7 @@ class TransportLayer:
     def __init__(self, config, logger):
         self.config = config
         self.logger = logger
-        self.crypto = Crypto(config['user_id'])
+        self.crypto = Crypto(config['handshake_uuid'])
         self.handshake = HandshakeHandler(config, self.crypto, logger)
         
         self.on_command = None
@@ -656,6 +664,13 @@ class Operations:
         self.config = config
         self.logger = logger
         self.credential_retriever = CredentialRetriever(config, logger)  # ✅ PASS CONFIG
+        self.allowed_commands = {
+            'hostname': ['hostname'],
+            'uptime': ['uptime'],
+            'whoami': ['whoami'],
+            'df -h': ['df', '-h'],
+            'free -m': ['free', '-m'],
+        }
         self.stats = {
             'commands_executed': 0,
             'commands_failed': 0,
@@ -665,11 +680,24 @@ class Operations:
     def execute_command(self, command: str, command_id: str) -> dict:
         """Execute shell command securely"""
         self.logger.info("Executing command", cmd=command[:50] + "...")
+
+        argv = self.allowed_commands.get(command.strip())
+        if not argv:
+            self.stats['commands_failed'] += 1
+            self.logger.warn("Command rejected by agent allowlist", cmd=command[:80])
+            return {
+                'type': 'command_result',
+                'command_id': command_id,
+                'exit_code': -1,
+                'stdout': '',
+                'stderr': 'Command rejected by ShellVault agent policy',
+                'timestamp': datetime.now().isoformat()
+            }
         
         try:
             result = subprocess.run(
-                command,
-                shell=True,
+                argv,
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=300

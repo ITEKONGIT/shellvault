@@ -12,6 +12,7 @@ interface SSHCredentials {
   ip_address: string;
   port: number;
   hostname: string;
+  host_key_fingerprint?: string;
 }
 
 interface SSHConnectionOptions {
@@ -22,6 +23,8 @@ interface SSHConnectionOptions {
   privateKey?: Buffer | string;
   agent?: string;
   readyTimeout?: number;
+  hostHash?: 'sha256';
+  hostVerifier?: (hashedKey: string) => boolean;
 }
 
 export class SSHConnection {
@@ -56,6 +59,13 @@ export class SSHConnection {
           username: credentials.username,
           readyTimeout: 10000, // 10 seconds
         };
+
+        if (credentials.host_key_fingerprint) {
+          options.hostHash = 'sha256';
+          options.hostVerifier = (hashedKey: string) => {
+            return normalizeFingerprint(hashedKey) === normalizeFingerprint(credentials.host_key_fingerprint!);
+          };
+        }
 
         // Add authentication method
         if (credentials.auth_method === 'key') {
@@ -347,3 +357,10 @@ export class SSHConnectionManager {
 
 // Export singleton instance
 export const sshConnectionManager = new SSHConnectionManager();
+
+function normalizeFingerprint(fingerprint: string): string {
+  return fingerprint
+    .trim()
+    .replace(/^SHA256:/i, '')
+    .replace(/=+$/g, '');
+}

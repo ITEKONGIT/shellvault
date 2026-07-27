@@ -14,10 +14,46 @@ export const COOKIE_NAMES = {
   REFRESH_TOKEN: 'refresh_token',
 } as const;
 
+function isLocalHttpAppUrl(): boolean {
+  const appUrl = process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL;
+
+  if (!appUrl) {
+    return false;
+  }
+
+  try {
+    const url = new URL(appUrl);
+    return (
+      url.protocol === 'http:' &&
+      ['localhost', '127.0.0.1', '::1'].includes(url.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function shouldUseSecureCookies(): boolean {
+  const explicitSetting = process.env.AUTH_COOKIE_SECURE?.toLowerCase();
+
+  if (explicitSetting === 'true') {
+    return true;
+  }
+
+  if (explicitSetting === 'false') {
+    return false;
+  }
+
+  if (isLocalHttpAppUrl()) {
+    return false;
+  }
+
+  return process.env.NODE_ENV === 'production';
+}
+
 // Cookie configuration
 const COOKIE_CONFIG = {
   httpOnly: true,
-  secure: process.env.NODE_ENV === 'production', // HTTPS only in production
+  secure: shouldUseSecureCookies(),
   sameSite: 'strict' as const,
   path: '/',
 };

@@ -124,6 +124,14 @@ const runtimeSchema = z.object({
     .url('BROKER_URL must be a valid URL')
     .default('http://localhost:8080'),
   BROKER_PORT: z.coerce.number().int().min(1).max(65535).default(8080),
+  BROKER_INTERNAL_TOKEN: z
+    .string()
+    .min(32, 'BROKER_INTERNAL_TOKEN must be at least 32 characters')
+    .optional(),
+  TERMINAL_GRANT_SECRET: z
+    .string()
+    .min(32, 'TERMINAL_GRANT_SECRET must be at least 32 characters')
+    .optional(),
 
   // ── Email ─────────────────────────────────────────────────────
   EMAIL_PROVIDER: z.enum(['sendgrid', 'resend', 'ses', 'smtp', 'console']).default('console'),
@@ -166,6 +174,8 @@ export function assertRuntimeEnv(): RuntimeConfig {
     APP_URL: process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL,
     BROKER_URL: process.env.BROKER_URL,
     BROKER_PORT: process.env.BROKER_PORT,
+    BROKER_INTERNAL_TOKEN: process.env.BROKER_INTERNAL_TOKEN,
+    TERMINAL_GRANT_SECRET: process.env.TERMINAL_GRANT_SECRET,
     EMAIL_PROVIDER: process.env.EMAIL_PROVIDER,
     EMAIL_FROM: process.env.EMAIL_FROM,
     LOG_LEVEL: process.env.LOG_LEVEL,
@@ -189,6 +199,19 @@ export function assertRuntimeEnv(): RuntimeConfig {
     ].join('\n');
 
     throw new Error(errorMessage);
+  }
+
+  if (getBuildConfig().NODE_ENV === 'production') {
+    const missingProductionSecrets = [
+      !result.data.BROKER_INTERNAL_TOKEN ? 'BROKER_INTERNAL_TOKEN' : null,
+      !result.data.TERMINAL_GRANT_SECRET ? 'TERMINAL_GRANT_SECRET' : null,
+    ].filter(Boolean);
+
+    if (missingProductionSecrets.length > 0) {
+      throw new Error(
+        `Production runtime environment is missing required broker secret(s): ${missingProductionSecrets.join(', ')}`
+      );
+    }
   }
 
   // Coerce TOTP_ENCRYPTION_KEY to use JWT_SECRET if not set

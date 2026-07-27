@@ -38,6 +38,102 @@ function timestamp() {
   return new Date().toISOString();
 }
 
+function base64UrlEncode(input) {
+  return Buffer.from(input).toString('base64url');
+}
+
+function base64UrlDecode(input) {
+  return Buffer.from(input, 'base64url').toString('utf8');
+}
+
+function getBrokerInternalToken() {
+  const token = process.env.BROKER_INTERNAL_TOKEN;
+  if (!token && process.env.NODE_ENV === 'production') {
+    throw new Error('BROKER_INTERNAL_TOKEN is required in production');
+  }
+  return token || 'dev-shellvault-broker-token-change-me';
+}
+
+function getTerminalGrantSecret() {
+  const secret = process.env.TERMINAL_GRANT_SECRET || process.env.BROKER_INTERNAL_TOKEN;
+  if (!secret && process.env.NODE_ENV === 'production') {
+    throw new Error('TERMINAL_GRANT_SECRET or BROKER_INTERNAL_TOKEN is required in production');
+  }
+  return secret || 'dev-shellvault-terminal-grant-change-me';
+}
+
+function timingSafeEqualString(a, b) {
+  const aBuffer = Buffer.from(String(a));
+  const bBuffer = Buffer.from(String(b));
+  if (aBuffer.length !== bBuffer.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(aBuffer, bBuffer);
+}
+
+function isInternalRequest(req) {
+  const auth = req.headers.authorization || '';
+  const expected = `Bearer ${getBrokerInternalToken()}`;
+  return timingSafeEqualString(auth, expected);
+}
+
+function rejectUnauthorized(res) {
+  res.writeHead(401, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ success: false, error: 'Unauthorized broker request' }));
+}
+
+function signTerminalGrant(payload) {
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+  const signature = crypto
+    .createHmac('sha256', getTerminalGrantSecret())
+    .update(encodedPayload)
+    .digest('base64url');
+  return `${encodedPayload}.${signature}`;
+}
+
+function verifyTerminalGrant(token, expected = {}) {
+  if (!token || typeof token !== 'string' || !token.includes('.')) {
+    return { valid: false, error: 'Missing terminal grant' };
+  }
+
+  const [encodedPayload, signature] = token.split('.');
+  if (!encodedPayload || !signature) {
+    return { valid: false, error: 'Malformed terminal grant' };
+  }
+
+  const expectedSignature = crypto
+    .createHmac('sha256', getTerminalGrantSecret())
+    .update(encodedPayload)
+    .digest('base64url');
+
+  if (!timingSafeEqualString(signature, expectedSignature)) {
+    return { valid: false, error: 'Invalid terminal grant signature' };
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(base64UrlDecode(encodedPayload));
+  } catch (error) {
+    return { valid: false, error: 'Invalid terminal grant payload' };
+  }
+
+  if (payload.purpose !== 'terminal-stream') {
+    return { valid: false, error: 'Invalid terminal grant purpose' };
+  }
+
+  if (!payload.expiresAt || Date.parse(payload.expiresAt) <= Date.now()) {
+    return { valid: false, error: 'Terminal grant expired' };
+  }
+
+  for (const [key, value] of Object.entries(expected)) {
+    if (value !== undefined && payload[key] !== value) {
+      return { valid: false, error: `Terminal grant ${key} mismatch` };
+    }
+  }
+
+  return { valid: true, payload };
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // AES-256-GCM CRYPTO UTILITIES
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -49,11 +145,11 @@ const AUTH_TAG_LENGTH = 16;  // 128 bits
 const SALT = 'shellvault-secure-salt-v1';
 
 /**
- * Derive a 256-bit encryption key from User UUID using Scrypt
+ * Derive a 256-bit encryption key from an agent secret using Scrypt.
  */
-function deriveKey(userUuid) {
+function deriveKey(secret) {
   return crypto.scryptSync(
-    userUuid,
+    secret,
     SALT,
     KEY_LENGTH,
     {
@@ -68,9 +164,9 @@ function deriveKey(userUuid) {
 /**
  * Encrypt data using AES-256-GCM
  */
-function encrypt(data, userUuid) {
+function encrypt(data, secret) {
   try {
-    const key = deriveKey(userUuid);
+    const key = deriveKey(secret);
     const iv = crypto.randomBytes(IV_LENGTH);
     const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
     
@@ -92,9 +188,9 @@ function encrypt(data, userUuid) {
 /**
  * Decrypt data using AES-256-GCM
  */
-function decrypt(encryptedData, userUuid) {
+function decrypt(encryptedData, secret) {
   try {
-    const key = deriveKey(userUuid);
+    const key = deriveKey(secret);
     const combined = Buffer.from(encryptedData, 'base64');
     
     const iv = combined.subarray(0, IV_LENGTH);
@@ -123,6 +219,10 @@ function hash(data) {
   return crypto.createHash('sha256').update(data).digest('hex');
 }
 
+function hmac(secret, data) {
+  return crypto.createHmac('sha256', secret).update(data).digest('hex');
+}
+
 function generateUuid() {
   return crypto.randomUUID();
 }
@@ -149,7 +249,7 @@ async function updateServerStatus(serverId, status) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // TIER 1: PROOF OF KEY OWNERSHIP
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-function generateTier1Challenge(userId, serverId) {
+function generateTier1Challenge(userId, serverId, encryptionSecret) {
   const challengeId = generateUuid();
   const nonce = generateNonce();
   const timestamp = new Date().toISOString();
@@ -161,7 +261,7 @@ function generateTier1Challenge(userId, serverId) {
     challenge_id: challengeId,
   };
   
-  const encrypted = encrypt(payload, userId);
+  const encrypted = encrypt(payload, encryptionSecret);
   
   const challenge = {
     id: challengeId,
@@ -193,19 +293,20 @@ function verifyTier1Response(challenge, response, handshakeUuid) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function generateTier2Challenge(userId, serverId, handshakeUuid) {
   const challengeId = generateUuid();
+  const nonce = generateNonce();
   const timestamp = new Date().toISOString();
   
   const payload = {
     tier: 2,
     challenge_id: challengeId,
+    nonce,
     metadata: {
-      expected_handshake_uuid: handshakeUuid,
       verify_hostname: true,
       timestamp,
     },
   };
   
-  const encrypted = encrypt(payload, userId);
+  const encrypted = encrypt(payload, handshakeUuid);
   
   const challenge = {
     id: challengeId,
@@ -224,14 +325,23 @@ function generateTier2Challenge(userId, serverId, handshakeUuid) {
   return challenge;
 }
 
-function verifyTier2Response(response, expectedHandshakeUuid) {
-  return response.handshake_uuid === expectedHandshakeUuid && response.verified;
+function verifyTier2Response(response, expectedHandshakeUuid, challenge) {
+  if (!response.verified || !response.hostname || !response.proof) {
+    return false;
+  }
+
+  const expectedProof = hmac(
+    expectedHandshakeUuid,
+    `${challenge.payload.challenge_id}:${challenge.payload.nonce}:${challenge.serverId}:${response.hostname}`
+  );
+
+  return timingSafeEqualString(response.proof, expectedProof);
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // TIER 3: SESSION KEY EXCHANGE
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-function generateTier3Challenge(userId, serverId) {
+function generateTier3Challenge(userId, serverId, encryptionSecret) {
   const challengeId = generateUuid();
   const sessionId = generateUuid();
   const sessionKey = generateNonce();
@@ -247,7 +357,7 @@ function generateTier3Challenge(userId, serverId) {
     allowed_commands: ['ssh', 'sftp'],
   };
   
-  const encrypted = encrypt(payload, userId);
+  const encrypted = encrypt(payload, encryptionSecret);
   
   const challenge = {
     id: challengeId,
@@ -315,13 +425,13 @@ async function requestCredentials(serverId, sessionId) {
   return credentialPromise;
 }
 
-function handleCredentialsResponse(data, userId) {
+function handleCredentialsResponse(data, encryptionSecret) {
   const { session_id, payload } = data;
   
   console.log(`[${timestamp()}] 🔑 Credentials response received`);
   console.log(`   Session ID: ${session_id}`);
   
-  const decrypted = decrypt(payload, userId);
+  const decrypted = decrypt(payload, encryptionSecret);
   
   if (!decrypted) {
     console.error('❌ Failed to decrypt credentials');
@@ -408,6 +518,11 @@ const server = http.createServer(async (req, res) => {
   
   // Get agent status
   if (parsedUrl.pathname === '/api/agent-status' && req.method === 'GET') {
+    if (!isInternalRequest(req)) {
+      rejectUnauthorized(res);
+      return;
+    }
+
     const serverId = parsedUrl.query.serverId;
     
     if (!serverId) {
@@ -431,6 +546,11 @@ const server = http.createServer(async (req, res) => {
   
   // Request credentials from agent
   if (parsedUrl.pathname === '/api/credentials' && req.method === 'POST') {
+    if (!isInternalRequest(req)) {
+      rejectUnauthorized(res);
+      return;
+    }
+
     let body = '';
     
     req.on('data', chunk => {
@@ -477,6 +597,11 @@ const server = http.createServer(async (req, res) => {
   // ✅ FIXED: Handle key content vs key path
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   if (parsedUrl.pathname === '/api/ssh/connect' && req.method === 'POST') {
+    if (!isInternalRequest(req)) {
+      rejectUnauthorized(res);
+      return;
+    }
+
     let body = '';
     
     req.on('data', chunk => {
@@ -485,11 +610,23 @@ const server = http.createServer(async (req, res) => {
     
     req.on('end', async () => {
       try {
-        const { sessionId, credentials } = JSON.parse(body);
+        const { sessionId, credentials, terminalGrant, userId, serverId } = JSON.parse(body);
         
-        if (!sessionId || !credentials) {
+        if (!sessionId || !credentials || !terminalGrant || !userId || !serverId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'sessionId and credentials required' }));
+          res.end(JSON.stringify({ error: 'sessionId, credentials, userId, serverId, and terminalGrant required' }));
+          return;
+        }
+
+        const grantCheck = verifyTerminalGrant(terminalGrant, {
+          sessionId,
+          userId,
+          serverId,
+        });
+
+        if (!grantCheck.valid) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: grantCheck.error }));
           return;
         }
         
@@ -530,6 +667,11 @@ const server = http.createServer(async (req, res) => {
                 sshClient,
                 stream,
                 ws: null,
+                userId,
+                serverId,
+                terminalGrant,
+                streamAttached: false,
+                expiresAt: grantCheck.payload.expiresAt,
                 connectedAt: new Date(),
               });
               
@@ -549,6 +691,14 @@ const server = http.createServer(async (req, res) => {
             username: credentials.username,
             readyTimeout: 10000,
           };
+
+          if (credentials.host_key_fingerprint) {
+            connectOptions.hostHash = 'sha256';
+            connectOptions.hostVerifier = (hashedKey) => {
+              const normalize = (value) => String(value).trim().replace(/^SHA256:/i, '').replace(/=+$/g, '');
+              return normalize(hashedKey) === normalize(credentials.host_key_fingerprint);
+            };
+          }
           
           // ✅ FIXED: Handle key content vs key path
           if (credentials.auth_method === 'key') {
@@ -582,7 +732,7 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({
           success: true,
           sessionId,
-          message: 'SSH connection established. Connect WebSocket to /api/ssh/stream?sessionId=' + sessionId
+          message: 'SSH connection established. Connect WebSocket to /api/ssh/stream and authenticate with terminal grant.'
         }));
         
       } catch (error) {
@@ -643,98 +793,132 @@ server.on('upgrade', (request, socket, head) => {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 sshWss.on('connection', async (ws, req) => {
-  const queryParams = url.parse(req.url, true).query;
-  const sessionId = queryParams.sessionId;
-
-  if (!sessionId) {
-    console.error('❌ SSH WebSocket: Missing sessionId');
-    ws.close(1008, 'Missing sessionId');
-    return;
-  }
-
   console.log(`[${timestamp()}] 🖥️  SSH Terminal WebSocket connected`);
-  console.log(`   Session ID: ${sessionId}`);
 
-  // Get session info from terminalSessions (set by /api/ssh/connect HTTP call)
-  const session = terminalSessions.get(sessionId);
-  
-  if (!session) {
-    console.error('❌ SSH session not found. Call /api/ssh/connect first');
-    ws.send('\r\n\x1b[31m❌ Session not found. Please reconnect.\x1b[0m\r\n');
-    ws.close(1008, 'Session not found');
-    return;
-  }
-
-  const { credentials, sshClient, stream } = session;
-
-  if (!stream) {
-    console.error('❌ SSH stream not available');
-    ws.send('\r\n\x1b[31m❌ SSH connection failed.\x1b[0m\r\n');
-    ws.close(1011, 'SSH stream not available');
-    return;
-  }
-
-  console.log(`✅ SSH stream connected to WebSocket`);
-  console.log(`   Host: ${credentials.ip_address}`);
-  console.log(`   User: ${credentials.username}`);
-
-  // Store WebSocket in session
-  session.ws = ws;
-
-  // SSH → Browser: Forward SSH output to WebSocket
-  stream.on('data', (data) => {
-    if (ws.readyState === 1) { // WebSocket.OPEN
-      ws.send(data.toString('utf-8'));
+  const authTimer = setTimeout(() => {
+    if (ws.readyState === 1) {
+      ws.close(1008, 'Terminal authentication timeout');
     }
-  });
+  }, 10000);
 
-  // Browser → SSH: Forward WebSocket input to SSH
-  ws.on('message', (message) => {
+  ws.once('message', (message) => {
     try {
-      const data = message.toString();
+      clearTimeout(authTimer);
 
-      // Check for control messages
-      if (data.startsWith('__RESIZE__:')) {
-        const [, dimensions] = data.split(':');
-        const [cols, rows] = dimensions.split(',').map(Number);
-        if (cols && rows && stream.setWindow) {
-          stream.setWindow(rows, cols, 480, 640);
-          console.log(`📏 Terminal resized: ${cols}x${rows}`);
-        }
-      } else {
-        // Regular terminal input
-        stream.write(data);
+      const authMessage = JSON.parse(message.toString());
+      if (authMessage.type !== 'terminal_auth') {
+        ws.close(1008, 'Terminal authentication required');
+        return;
       }
+
+      const { sessionId, terminalGrant } = authMessage;
+      if (!sessionId || !terminalGrant) {
+        ws.close(1008, 'Missing terminal authentication fields');
+        return;
+      }
+
+      const session = terminalSessions.get(sessionId);
+      if (!session) {
+        console.error('❌ SSH session not found. Call /api/ssh/connect first');
+        ws.send('\r\n\x1b[31m❌ Session not found. Please reconnect.\x1b[0m\r\n');
+        ws.close(1008, 'Session not found');
+        return;
+      }
+
+      const grantCheck = verifyTerminalGrant(terminalGrant, {
+        sessionId,
+        userId: session.userId,
+        serverId: session.serverId,
+      });
+
+      if (!grantCheck.valid || !timingSafeEqualString(terminalGrant, session.terminalGrant)) {
+        ws.close(1008, grantCheck.error || 'Invalid terminal grant');
+        return;
+      }
+
+      if (session.streamAttached) {
+        ws.close(1008, 'Terminal session already attached');
+        return;
+      }
+
+      const { credentials, stream } = session;
+
+      if (!stream) {
+        console.error('❌ SSH stream not available');
+        ws.send('\r\n\x1b[31m❌ SSH connection failed.\x1b[0m\r\n');
+        ws.close(1011, 'SSH stream not available');
+        return;
+      }
+
+      console.log(`✅ SSH stream authenticated and connected to WebSocket`);
+      console.log(`   Session ID: ${sessionId}`);
+      console.log(`   Host: ${credentials.ip_address}`);
+      console.log(`   User: ${credentials.username}`);
+
+      session.ws = ws;
+      session.streamAttached = true;
+
+      const forwardSshOutput = (data) => {
+        if (ws.readyState === 1) { // WebSocket.OPEN
+          ws.send(data.toString('utf-8'));
+        }
+      };
+
+      const handleStreamClose = () => {
+        console.log(`[${timestamp()}] 🔌 SSH stream closed`);
+        ws.close(1000, 'SSH connection closed');
+        cleanupTerminalSession(sessionId);
+      };
+
+      const handleStreamError = (error) => {
+        console.error('❌ SSH stream error:', error.message);
+        ws.send(`\r\n\x1b[31m❌ SSH Error: ${error.message}\x1b[0m\r\n`);
+        ws.close(1011, 'SSH stream error');
+      };
+
+      // SSH → Browser: Forward SSH output to WebSocket
+      stream.on('data', forwardSshOutput);
+      stream.once('close', handleStreamClose);
+      stream.once('error', handleStreamError);
+      stream.once('end', () => {
+        console.log(`[${timestamp()}] 🔌 SSH stream ended`);
+      });
+
+      // Browser → SSH: Forward WebSocket input to SSH
+      ws.on('message', (terminalMessage) => {
+        try {
+          const data = terminalMessage.toString();
+
+          if (data.startsWith('__RESIZE__:')) {
+            const [, dimensions] = data.split(':');
+            const [cols, rows] = dimensions.split(',').map(Number);
+            if (cols && rows && stream.setWindow) {
+              stream.setWindow(rows, cols, 480, 640);
+              console.log(`📏 Terminal resized: ${cols}x${rows}`);
+            }
+          } else {
+            stream.write(data);
+          }
+        } catch (error) {
+          console.error('❌ Error processing terminal input:', error.message);
+        }
+      });
+
+      ws.on('close', () => {
+        console.log(`[${timestamp()}] 🔌 Terminal WebSocket disconnected`);
+        stream.off('data', forwardSshOutput);
+        cleanupTerminalSession(sessionId);
+      });
+
     } catch (error) {
-      console.error('❌ Error processing terminal input:', error.message);
+      clearTimeout(authTimer);
+      console.error('❌ Terminal auth error:', error.message);
+      ws.close(1008, 'Invalid terminal authentication message');
     }
-  });
-
-  // Handle SSH stream close
-  stream.on('close', () => {
-    console.log(`[${timestamp()}] 🔌 SSH stream closed`);
-    ws.close(1000, 'SSH connection closed');
-    cleanupTerminalSession(sessionId);
-  });
-
-  stream.on('end', () => {
-    console.log(`[${timestamp()}] 🔌 SSH stream ended`);
-  });
-
-  // Handle WebSocket close
-  ws.on('close', () => {
-    console.log(`[${timestamp()}] 🔌 Terminal WebSocket disconnected`);
-    cleanupTerminalSession(sessionId);
   });
 
   ws.on('error', (error) => {
     console.error('❌ Terminal WebSocket error:', error.message);
-  });
-
-  stream.on('error', (error) => {
-    console.error('❌ SSH stream error:', error.message);
-    ws.send(`\r\n\x1b[31m❌ SSH Error: ${error.message}\x1b[0m\r\n`);
-    ws.close(1011, 'SSH stream error');
   });
 });
 
@@ -795,7 +979,7 @@ wss.on('connection', async (ws, req) => {
   });
 
   // Start TIER 1 handshake
-  const tier1 = generateTier1Challenge(userId, serverId);
+  const tier1 = generateTier1Challenge(userId, serverId, serverRecord.handshakeUuid);
   ws.send(JSON.stringify({
     type: 'challenge',
     tier: 1,
@@ -818,7 +1002,7 @@ wss.on('connection', async (ws, req) => {
       if (message.type === 'response') {
         const { tier, payload } = message;
         
-        const decrypted = decrypt(payload, userId);
+        const decrypted = decrypt(payload, serverRecord.handshakeUuid);
         if (!decrypted) {
           console.error(`❌ Failed to decrypt TIER ${tier} response`);
           ws.close(1008, 'Decryption failed');
@@ -861,7 +1045,7 @@ wss.on('connection', async (ws, req) => {
               return;
             }
             
-            const tier2Valid = verifyTier2Response(decrypted, serverRecord.handshakeUuid);
+            const tier2Valid = verifyTier2Response(decrypted, serverRecord.handshakeUuid, challenge2);
             if (!tier2Valid) {
               console.error('❌ TIER 2: Verification failed');
               ws.close(1008, 'Verification failed');
@@ -871,7 +1055,7 @@ wss.on('connection', async (ws, req) => {
             console.log(`✅ TIER 2 PASSED for server ${serverId.substring(0, 8)}...`);
             agent.handshakeTier = 2;
             
-            const tier3 = generateTier3Challenge(userId, serverId);
+            const tier3 = generateTier3Challenge(userId, serverId, serverRecord.handshakeUuid);
             ws.send(JSON.stringify({
               type: 'challenge',
               tier: 3,
@@ -915,7 +1099,7 @@ wss.on('connection', async (ws, req) => {
         }
       } 
       else if (message.type === 'credentials_response') {
-        handleCredentialsResponse(message, userId);
+        handleCredentialsResponse(message, serverRecord.handshakeUuid);
       } 
       else if (message.type === 'heartbeat') {
         console.log(`💓 Heartbeat from server ${serverId.substring(0, 8)}...`);
